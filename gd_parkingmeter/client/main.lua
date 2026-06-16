@@ -1,18 +1,28 @@
-local lastRobTime = 0
+local robbedMeters = {}  -- Cooldown by position
 
--- Add ox_target to parking meters
 Citizen.CreateThread(function()
+    if Config.Debug then
+        print('^2[ParkingMeter] Resource loaded - Adding targets...^7')
+    end
+
     for _, model in ipairs(Config.MeterModels) do
         exports.ox_target:addModel(model, {
             {
                 name = 'rob_parking_meter',
                 icon = 'fas fa-hand-holding-dollar',
                 label = 'Steal from Parking Meter',
+                distance = 3.0,
                 onSelect = function(data)
                     RobParkingMeter(data.entity)
                 end,
                 canInteract = function(entity, distance, coords, name, bone)
-                    return (GetGameTimer() - lastRobTime) > (Config.PlayerCooldown * 1000)
+                    if not entity or entity == 0 then return false end
+                    
+                    local pos = GetEntityCoords(entity)
+                    local key = math.floor(pos.x) .. "_" .. math.floor(pos.y)  -- Position-based key
+                    
+                    local lastTime = robbedMeters[key] or 0
+                    return (GetGameTimer() - lastTime) > (Config.PlayerCooldown * 1000)
                 end
             }
         })
@@ -20,7 +30,8 @@ Citizen.CreateThread(function()
 end)
 
 function RobParkingMeter(entity)
-    -- Drilling sound
+    if not entity or entity == 0 then return end
+
     PlaySoundFrontend(-1, "Drill_01", "DLC_HEIST_FLEECA_SOUNDSET", true)
 
     if lib.progressBar({
@@ -35,42 +46,34 @@ function RobParkingMeter(entity)
             flag = 49
         }
     }) then
-        lastRobTime = GetGameTimer()
+        -- Position-based cooldown (fixes local entity issue)
+        local pos = GetEntityCoords(entity)
+        local key = math.floor(pos.x) .. "_" .. math.floor(pos.y)
+        robbedMeters[key] = GetGameTimer()
 
-        local coords = GetEntityCoords(entity)
+        local coords = pos
         TriggerServerEvent('parkingmeter:rob', coords)
 
-        -- Success sound
         PlaySoundFrontend(-1, "PICK_UP", "HUD_FRONTEND_DEFAULT_SOUNDSET", true)
     else
-        -- Stop sound on cancel
         StopSoundFrontend()
-        lib.notify({
-            title = 'Cancelled',
-            description = 'You stopped tampering.',
-            type = 'error'
-        })
+        lib.notify({ title = 'Cancelled', description = 'You stopped tampering.', type = 'error' })
     end
 end
 
 RegisterNetEvent('parkingmeter:success', function(amount)
-    lib.notify({
-        title = 'Success',
-        description = 'You stole $' .. amount .. ' from the meter!',
-        type = 'success'
-    })
+    lib.notify({ title = 'Success', description = 'You stole $' .. amount .. ' from the meter!', type = 'success' })
 end)
 
 RegisterNetEvent('parkingmeter:sendDispatch', function(coords)
     local data = exports['cd_dispatch']:GetPlayerInfo() or {}
-
     TriggerServerEvent('cd_dispatch:AddNotification', {
-        job_table = {'police', sasp},
+        job_table = {'police'},
         coords = coords,
         title = Config.Dispatch.title,
-        message = string.format(Config.Dispatch.message, data.street_1 or 'Unknown'),
+        message = string.format(Config.Dispatch.message, data.street or 'Unknown'),
         flash = 0,
-        unique_id = 'meter_rob_' .. GetPlayerServerId(PlayerId()) .. '_' .. GetGameTimer(),
+        unique_id = data.unique_id,
         sound = 1,
         blip = {
             sprite = Config.Dispatch.blipSprite,
@@ -82,4 +85,16 @@ RegisterNetEvent('parkingmeter:sendDispatch', function(coords)
             radius = 0,
         }
     })
+end)
+
+-- Optional cleanup
+Citizen.CreateThread(function()
+    while true do
+        Wait(120000) -- every 2 minutes
+        for key, time in pairs(robbedMeters) do
+            if GetGameTimer() - time > (Config.PlayerCooldown * 1000 + 300000) then
+                robbedMeters[key] = nil
+            end
+        end
+    end
 end)
