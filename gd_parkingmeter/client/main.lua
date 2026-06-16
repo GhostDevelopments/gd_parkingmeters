@@ -32,33 +32,104 @@ end)
 function RobParkingMeter(entity)
     if not entity or entity == 0 then return end
 
-    PlaySoundFrontend(-1, "Drill_01", "DLC_HEIST_FLEECA_SOUNDSET", true)
+    local ped = PlayerPedId()
 
-    if lib.progressBar({
+    -- Lockpick/Screwdriver Prop
+    local model = `prop_tool_screwdvr03`
+
+    RequestModel(model)
+    while not HasModelLoaded(model) do
+        Wait(0)
+    end
+
+    local prop = CreateObject(model, 0.0, 0.0, 0.0, true, true, false)
+
+    AttachEntityToEntity(
+    prop,
+    ped,
+    GetPedBoneIndex(ped, 57005),
+    0.10, 0.01, -0.01,
+    180.0, 0.0, 90.0,
+    true, true, false, true, 1, true
+)
+
+    -- Load Sparks Asset
+    RequestNamedPtfxAsset("core")
+    while not HasNamedPtfxAssetLoaded("core") do
+        Wait(0)
+    end
+
+    UseParticleFxAssetNextCall("core")
+
+    local sparks = StartParticleFxLoopedOnEntity(
+        "ent_dst_elec_fire_sp",
+        entity,
+        0.0, 0.0, 0.15,
+        0.0, 0.0, 0.0,
+        0.4,
+        false,
+        false,
+        false
+    )
+
+    local success = lib.progressBar({
         duration = Config.RobTime,
-        label = 'Tampering with parking meter...',
+        label = 'Prying open parking meter...',
         useWhileDead = false,
         canCancel = true,
-        disable = { move = true, car = true, combat = true },
+        disable = {
+            move = true,
+            car = true,
+            combat = true
+        },
         anim = {
-            dict = 'anim@heists@fleeca_bank@drilling',
-            clip = 'drill_straight_fail',
+            dict = 'veh@break_in@0h@p_m_one@',
+            clip = 'low_force_entry_ds',
             flag = 49
         }
-    }) then
-        -- Position-based cooldown (fixes local entity issue)
-        local pos = GetEntityCoords(entity)
-        local key = math.floor(pos.x) .. "_" .. math.floor(pos.y)
-        robbedMeters[key] = GetGameTimer()
+    })
 
-        local coords = pos
-        TriggerServerEvent('parkingmeter:rob', coords)
-
-        PlaySoundFrontend(-1, "PICK_UP", "HUD_FRONTEND_DEFAULT_SOUNDSET", true)
-    else
-        StopSoundFrontend()
-        lib.notify({ title = 'Cancelled', description = 'You stopped tampering.', type = 'error' })
+    -- Cleanup FX
+    if sparks then
+        StopParticleFxLooped(sparks, false)
     end
+
+    -- Cleanup Prop
+    if DoesEntityExist(prop) then
+        DeleteEntity(prop)
+    end
+
+    if not success then
+        lib.notify({
+            title = 'Cancelled',
+            description = 'You stopped tampering.',
+            type = 'error'
+        })
+        return
+    end
+
+    -- Easy x3 Skill Check
+    local passed = lib.skillCheck(
+        {'easy', 'easy', 'easy'},
+        {'e', 'e', 'e', 'e'}
+    )
+
+    if not passed then
+        lib.notify({
+            title = 'Failed',
+            description = 'You failed to pry open the meter.',
+            type = 'error'
+        })
+        return
+    end
+
+    -- Position-based cooldown
+    local pos = GetEntityCoords(entity)
+    local key = math.floor(pos.x) .. "_" .. math.floor(pos.y)
+
+    robbedMeters[key] = GetGameTimer()
+
+    TriggerServerEvent('parkingmeter:rob', pos)
 end
 
 RegisterNetEvent('parkingmeter:success', function(amount)
