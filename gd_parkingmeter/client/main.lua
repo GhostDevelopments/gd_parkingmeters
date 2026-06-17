@@ -1,198 +1,210 @@
+-- Client-side parking meter theft script
 local robbedMeters = {}
+local isRobbing = false
+local isInitialized = false
 
--- Asset hashes
-local particleAsset = "core"
-local particleEffect = "ent_dst_elec_fire_sp"
+--- Initialize target options and assets
+local function initializeResource()
+    if isInitialized then return true end
 
--- Robust initialization with multiple fallback methods
-local function InitializeTargets()
-    if not exports.ox_target or not exports.ox_lib then
-        print('^1[ParkingMeter] Dependencies not ready yet, retrying...^7')
+    -- Verify ox_target exports
+    if GetResourceState("ox_target") ~= "started" or not exports.ox_target then
         return false
     end
 
-    if Config.Debug then
-        print('^2[ParkingMeter] Dependencies detected. Loading assets and adding targets...^7')
-    end
+    -- Clear existing to prevent duplicates
+    pcall(function()
+        exports.ox_target:removeModel(Config.MeterModels, "rob_parking_meter")
+    end)
 
-    -- Load particle asset
-    RequestNamedPtfxAsset(particleAsset)
-
-    for _, model in ipairs(Config.MeterModels) do
-        exports.ox_target:addModel(model, {
+    -- Register models with ox_target
+    local status, err = pcall(function()
+        exports.ox_target:addModel(Config.MeterModels, {
             {
-                name = 'rob_parking_meter',
-                icon = 'fas fa-hand-holding-dollar',
-                label = 'Steal from Parking Meter',
-                distance = 3.0,
+                name = "rob_parking_meter",
+                icon = "fas fa-hand-holding-dollar",
+                label = "Tamper with Meter",
+                distance = 1.5,
                 onSelect = function(data)
-                    if data and data.entity and data.entity ~= 0 then
-                        RobParkingMeter(data.entity)
+                    if data and data.entity then
+                        ExecuteRobbery(data.entity)
                     end
                 end,
-                canInteract = function(entity)
-                    if not entity or entity == 0 then return false end
-
+                canInteract = function(entity, distance, coords, name, bone)
+                    if isRobbing then return false end
+                    
                     local pos = GetEntityCoords(entity)
-                    local key = string.format("%.1f_%.1f", pos.x, pos.y)
-
+                    if not pos or pos == vec3(0, 0, 0) then return true end
+                    
+                    local key = ("%.1f_%.1f"):format(pos.x, pos.y)
                     local lastTime = robbedMeters[key] or 0
+
                     return (GetGameTimer() - lastTime) > (Config.PlayerCooldown * 1000)
                 end
             }
         })
+    end)
+
+    if not status then
+        if Config.Debug then print(("^1[ParkingMeter] Target registration error: %s^7"):format(tostring(err))) end
+        return false
     end
 
-    if Config.Debug then
-        print('^2[ParkingMeter] Targets successfully added! Resource fully loaded.^7')
-    end
+    -- Cache assets
+    RequestAnimDict(Config.Animation.dict)
+    local modelHash = type(Config.Animation.propModel) == "number" and Config.Animation.propModel or GetHashKey(Config.Animation.propModel)
+    RequestModel(modelHash)
+
+    isInitialized = true
+    if Config.Debug then print("^2[ParkingMeter] Successfully initialized^7") end
     return true
 end
 
--- Main initialization thread
-Citizen.CreateThread(function()
-    if Config.Debug then
-        print('^2[ParkingMeter] Resource starting...^7')
-    end
+-- Startup logic
+CreateThread(function()
+    while not NetworkIsPlayerActive(PlayerId()) do Wait(500) end
+    
+    -- Delay for server boot stability
+    Wait(2500)
 
-    robbedMeters = {}
-
-    -- Initial wait
-    local attempts = 0
-    while (not exports.ox_target or not exports.ox_lib) and attempts < 100 do
-        attempts = attempts + 1
-        Wait(100)
-    end
-
-    if InitializeTargets() then
-        return
-    end
-
-    -- Fallback: Retry every second for up to 30 seconds
-    print('^3[ParkingMeter] Waiting for ox_target & ox_lib...^7')
-    local retryCount = 0
-    while retryCount < 30 do
-        Wait(1000)
-        retryCount = retryCount + 1
-        if InitializeTargets() then
-            return
-        end
-    end
-
-    -- Final failure
-    print('^1[ParkingMeter] CRITICAL ERROR: ox_target or ox_lib still not available after 30+ seconds!^7')
-    print('^1[ParkingMeter] Make sure ox_lib and ox_target are started before parkingmeter.^7')
-end)
-
--- Also listen for resource start events (helps on restarts)
-AddEventHandler('onResourceStart', function(resourceName)
-    if resourceName == GetCurrentResourceName() or resourceName == 'ox_lib' or resourceName == 'ox_target' then
-        if Config.Debug then
-            print('^3[ParkingMeter] Resource start detected for: ' .. resourceName .. '^7')
-        end
-        Wait(1000)
-        InitializeTargets()
+    local timeout = GetGameTimer() + 60000
+    while not isInitialized and GetGameTimer() < timeout do
+        if initializeResource() then break end
+        Wait(2500)
     end
 end)
 
-function RobParkingMeter(entity)
-    if not entity or entity == 0 then return end
+-- Resource event handlers
+AddEventHandler("onResourceStart", function(resourceName)
+    if resourceName == "ox_target" then
+        Wait(1000)
+        isInitialized = false
+        initializeResource()
+    end
+end)
 
-    local ped = PlayerPedId()
+--- Perform the robbery action
+--- @param entity number Entity handle
+function ExecuteRobbery(entity)
+    if not entity or entity == 0 or isRobbing then return end
+
+    local ped = cache.ped
+    if IsPedInAnyVehicle(ped, true) then
+        return lib.notify({ title = "Action Impossible", description = "You cannot do this from a vehicle.", type = "error" })
+    end
+
     local pos = GetEntityCoords(entity)
+    if #(pos) < 1.0 then return end
 
-    if Config.Debug then print('^2[ParkingMeter] Robbery started at:', pos) end
+    isRobbing = true
 
-    -- Animation + Prop
-    local animDict = "anim@amb@clubhouse@tutorial@bkr_tut_ig3@"
-    local animName = "machinic_loop_mechandplayer"
+    -- Prepare particles
+    if not HasNamedPtfxAssetLoaded(Config.Fx.asset) then
+        RequestNamedPtfxAsset(Config.Fx.asset)
+        while not HasNamedPtfxAssetLoaded(Config.Fx.asset) do Wait(0) end
+    end
 
-    RequestAnimDict(animDict)
-    while not HasAnimDictLoaded(animDict) do Wait(10) end
-    TaskPlayAnim(ped, animDict, animName, 8.0, -8.0, -1, 49, 0, false, false, false)
-
-    local propModel = `bzzz_props_lockpick_01`
-    RequestModel(propModel)
-    while not HasModelLoaded(propModel) do Wait(10) end
-
-    local prop = CreateObject(propModel, pos.x, pos.y, pos.z, true, true, false)
-    AttachEntityToEntity(prop, ped, GetPedBoneIndex(ped, 18905), 0.12, 0.08, -0.01, -36.0, -46.0, 0.0, true, true, false, true, 1, true)
-
-    -- Sparks
-    UseParticleFxAssetNextCall(particleAsset)
-    local sparks = StartParticleFxLoopedOnEntity(particleEffect, entity, 0.0, 0.0, 0.15, 0.0, 0.0, 0.0, 0.45, false, false, false)
+    UseParticleFxAssetNextCall(Config.Fx.asset)
+    local sparks = StartParticleFxLoopedOnEntity(Config.Fx.effect, entity, 0.0, 0.0, 0.15, 0.0, 0.0, 0.0, 0.45, false, false, false)
 
     -- Progress Bar
     local success = lib.progressBar({
         duration = Config.RobTime,
-        label = 'Prying open parking meter...',
+        label = "Prying open parking meter...",
         useWhileDead = false,
         canCancel = true,
         disable = { move = true, car = true, combat = true },
+        anim = {
+            dict = Config.Animation.dict,
+            clip = Config.Animation.name,
+            flag = 49
+        },
+        prop = {
+            model = Config.Animation.propModel,
+            bone = 18905,
+            pos = vec3(0.12, 0.08, -0.01),
+            rot = vec3(-36.0, -46.0, 0.0)
+        }
     })
 
-    -- Cleanup
-    if DoesEntityExist(prop) then DeleteEntity(prop) end
     if sparks then StopParticleFxLooped(sparks, false) end
-    StopAnimTask(ped, animDict, animName, -4.0)
-    RemoveAnimDict(animDict)
 
     if not success then
-        lib.notify({ title = 'Cancelled', description = 'You stopped tampering.', type = 'error' })
-        return
+        isRobbing = false
+        return lib.notify({ title = "Cancelled", description = "You stopped tampering with the meter.", type = "warning" })
     end
 
-    if not lib.skillCheck({'easy', 'easy', 'easy'}, {'e', 'e', 'e', 'e'}) then
-        lib.notify({ title = 'Failed', description = 'You failed to pry open the meter.', type = 'error' })
-        return
+    -- Skill check
+    if Config.SkillCheck.enabled then
+        FreezeEntityPosition(ped, true)
+        local skillSuccess = lib.skillCheck(Config.SkillCheck.difficulty)
+        FreezeEntityPosition(ped, false)
+        
+        if not skillSuccess then
+            isRobbing = false
+            return lib.notify({ title = "Failed", description = "You failed to pry open the meter.", type = "error" })
+        end
     end
 
-    -- Cooldown
-    local key = string.format("%.1f_%.1f", pos.x, pos.y)
+    -- Register cooldown and trigger server
+    local key = ("%.1f_%.1f"):format(pos.x, pos.y)
     robbedMeters[key] = GetGameTimer()
 
-    if Config.Debug then
-        print('^2[ParkingMeter] COOLDOWN SET for key: ' .. key .. '^7')
-    end
-
-    TriggerServerEvent('parkingmeter:rob', pos)
+    TriggerServerEvent("parkingmeter:rob", { x = pos.x, y = pos.y, z = pos.z })
+    isRobbing = false
 end
 
-RegisterNetEvent('parkingmeter:success', function(amount)
-    lib.notify({ title = 'Success', description = 'You stole $' .. amount .. ' from the meter!', type = 'success' })
+-- Success/Failure events
+RegisterNetEvent("parkingmeter:success", function(amount)
+    lib.notify({
+        title = "Success",
+        description = ("You stole $%d from the meter!"):format(amount),
+        type = "success"
+    })
 end)
 
-RegisterNetEvent('parkingmeter:sendDispatch', function(coords)
-    local data = exports['cd_dispatch']:GetPlayerInfo() or {}
-    TriggerServerEvent('cd_dispatch:AddNotification', {
-        job_table = {'police'},
+RegisterNetEvent("parkingmeter:failed", function(reason)
+    lib.notify({
+        title = "Failed",
+        description = reason or "Something went wrong.",
+        type = "error"
+    })
+end)
+
+-- Dispatch logic
+RegisterNetEvent("parkingmeter:sendDispatch", function(coords)
+    if not Config.Dispatch.enabled or GetResourceState(Config.Dispatch.resource) ~= "started" then return end
+
+    local streetName = GetStreetNameFromHashKey(GetStreetNameAtCoord(coords.x, coords.y, coords.z))
+
+    TriggerEvent(Config.Dispatch.resource .. ":AddNotification", {
+        job_table = { "police" },
         coords = coords,
         title = Config.Dispatch.title,
-        message = string.format(Config.Dispatch.message, data.street or 'Unknown'),
+        message = Config.Dispatch.message:format(streetName or "Unknown"),
         flash = 0,
-        unique_id = data.unique_id,
+        unique_id = "parking_" .. GetGameTimer(),
         sound = 1,
         blip = {
             sprite = Config.Dispatch.blipSprite,
             scale = Config.Dispatch.blipScale,
             colour = Config.Dispatch.blipColor,
-            flashes = true,
-            text = 'Parking Meter Theft',
+            flashes = Config.Dispatch.blipFlashes,
+            text = "Parking Meter Theft",
             time = Config.Dispatch.blipTime,
-            radius = 0,
         }
     })
 end)
 
--- Cooldown cleanup
-Citizen.CreateThread(function()
+-- Cleanup Loop (infrequent)
+CreateThread(function()
     while true do
-        Wait(60000)
+        Wait(300000) -- Check every 5 minutes
         local now = GetGameTimer()
-        local expireTime = (Config.PlayerCooldown * 1000) + 300000
+        local threshold = (Config.PlayerCooldown * 1000) + 60000
 
         for key, time in pairs(robbedMeters) do
-            if now - time > expireTime then
+            if now - time > threshold then
                 robbedMeters[key] = nil
             end
         end
